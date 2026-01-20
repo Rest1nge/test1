@@ -47,14 +47,39 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------- TikTok --------
 async def download_tiktok(update, url):
     api_url = f"https://www.tikwm.com/api/?url={url}"
+
     try:
         data = requests.get(api_url, timeout=15).json()
-        if data.get("code") == 0:
-            await update.message.reply_video(data["data"]["play"])
-        else:
-            await update.message.reply_text("⚠️ TikTok видео не найдено")
-    except:
+
+        if data.get("code") != 0:
+            await update.message.reply_text("⚠️ TikTok контент не найден")
+            return
+
+        content = data.get("data", {})
+
+        # 🎥 Если это видео
+        if content.get("play"):
+            await update.message.reply_video(
+                video=content["play"],
+                caption="✅ TikTok Video"
+            )
+            return
+
+        # 🖼 Если это фото-пост
+        images = content.get("images")
+        if images:
+            await update.message.reply_text("🖼 TikTok фото-пост")
+
+            for img in images[:10]:  # лимит Telegram
+                await update.message.reply_photo(img)
+
+            return
+
+        await update.message.reply_text("⚠️ Не удалось определить тип TikTok контента")
+
+    except Exception as e:
         await update.message.reply_text("⚠️ Ошибка при загрузке TikTok")
+reply_text("⚠️ Ошибка при загрузке TikTok")
 
 # -------- Pinterest --------
 async def download_pinterest(update, url):
