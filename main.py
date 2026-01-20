@@ -190,7 +190,9 @@ async def download_youtube_shorts(update, url):
     command = [
         "yt-dlp",
         "--cookies", COOKIES_FILE,
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
+        "--no-hls",
+        "--merge-output-format", "mp4",
+        "-f", "best[ext=mp4]/best",
         "-o", output,
         url
     ]
@@ -217,7 +219,7 @@ async def download_youtube_shorts(update, url):
     except subprocess.CalledProcessError:
         await status.delete()
         await update.message.reply_text(
-            "❌ Не удалось скачать YouTube Shorts\n"
+            "❌ Shorts не скачан\n"
         )
 
 
