@@ -5,19 +5,20 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 
 TOKEN = os.getenv("TOKEN")
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 DOWNLOAD_DIR = "downloads"
+COOKIES_FILE = "cookies.txt"
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
-        "👋 Привет! Отправь ссылку на Instagram Reel, и я его скачаю.\n"
-        "⚠️ Работает только с публичными Reels."
+        "👋 Отправь ссылку на Instagram Reel.\n"
+        "✅ Работает стабильно (cookies включены)."
     )
 
 
@@ -25,12 +26,16 @@ async def start(message: types.Message):
 async def download_reel(message: types.Message):
     url = message.text.strip()
 
-    # убираем параметры после ?
-    if '?' in url:
-        url = url.split('?')[0]
+    # очистка ссылки
+    if "?" in url:
+        url = url.split("?")[0]
 
-    if "instagram.com" not in url or "/reel/" not in url:
+    if "instagram.com/reel/" not in url:
         await message.answer("❌ Это не ссылка на Instagram Reel")
+        return
+
+    if not os.path.exists(COOKIES_FILE):
+        await message.answer("❌ Файл cookies.txt не найден")
         return
 
     await message.answer("⏳ Скачиваю видео...")
@@ -39,8 +44,9 @@ async def download_reel(message: types.Message):
 
     command = [
         "yt-dlp",
-        "--no-check-certificate",  # помогает при проблемах с SSL
-        "-f", "b[ext=mp4]",        # лучший mp4
+        "--cookies", COOKIES_FILE,
+        "--no-check-certificate",
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
         "-o", output_path,
         url
     ]
@@ -48,7 +54,6 @@ async def download_reel(message: types.Message):
     try:
         subprocess.run(command, check=True)
 
-        # получаем последний скачанный файл
         files = sorted(
             os.listdir(DOWNLOAD_DIR),
             key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)),
@@ -56,22 +61,26 @@ async def download_reel(message: types.Message):
         )
 
         if not files:
-            await message.answer("❌ Не удалось скачать видео. Возможно, Reel приватный или удалён.")
+            await message.answer("❌ Видео не найдено")
             return
 
         video_path = os.path.join(DOWNLOAD_DIR, files[0])
 
         await message.answer_video(
             video=types.FSInputFile(video_path),
-            caption="✅ Готово! Видео успешно скачано."
+            caption="✅ Готово"
         )
 
         os.remove(video_path)
 
     except subprocess.CalledProcessError:
-        await message.answer("❌ Не удалось скачать видео. Возможно, Reel приватный или ссылка неверная.")
-    except Exception as e:
-        await message.answer(f"❌ Произошла ошибка: {e}")
+        await message.answer(
+            "❌ Не удалось скачать Reel.\n"
+            "Причины:\n"
+            "• Видео удалено\n"
+            "• Аккаунт ограничен\n"
+            "• Cookies устарели"
+        )
 
 
 async def main():
