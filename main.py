@@ -79,7 +79,7 @@ async def download_tiktok(update, url):
 
     except Exception as e:
         await update.message.reply_text("⚠️ Ошибка при загрузке TikTok")
-reply_text("⚠️ Ошибка при загрузке TikTok")
+
 
 # -------- Pinterest --------
 async def download_pinterest(update, url):
@@ -118,7 +118,7 @@ async def download_pinterest(update, url):
 
     except subprocess.CalledProcessError:
         await update.message.reply_text("❌ Не удалось скачать Pinterest контент")
-pdate.message.reply_text("⚠️ Ошибка Pinterest")
+
 
 # -------- Instagram Reels (yt-dlp + cookies) --------
 async def download_instagram(update, url):
