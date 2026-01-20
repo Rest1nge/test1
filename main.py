@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # ================== CONFIG ==================
-TOKEN = os.getenv("TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
