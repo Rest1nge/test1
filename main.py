@@ -58,20 +58,42 @@ async def download_tiktok(update, url):
 
 # -------- Pinterest --------
 async def download_pinterest(update, url):
-    api_url = f"https://api.vreden.my.id/api/pinterest?url={url}"
+    await update.message.reply_text("⏳ Скачиваю Pinterest...")
+
+    output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
+
+    command = [
+        "yt-dlp",
+        "-f", "bv*+ba/b",
+        "-o", output,
+        url
+    ]
+
     try:
-        data = requests.get(api_url, timeout=15).json()
-        if data.get("status") != 200:
-            await update.message.reply_text("⚠️ Pinterest контент не найден")
+        subprocess.run(command, check=True)
+
+        files = sorted(
+            os.listdir(DOWNLOAD_DIR),
+            key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)),
+            reverse=True
+        )
+
+        if not files:
+            await update.message.reply_text("❌ Контент не найден")
             return
 
-        result = data.get("result", {})
-        if result.get("type") == "video":
-            await update.message.reply_video(result.get("video"))
+        path = os.path.join(DOWNLOAD_DIR, files[0])
+
+        if path.endswith(".mp4"):
+            await update.message.reply_video(video=open(path, "rb"))
         else:
-            await update.message.reply_photo(result.get("image"))
-    except:
-        await update.message.reply_text("⚠️ Ошибка Pinterest")
+            await update.message.reply_photo(photo=open(path, "rb"))
+
+        os.remove(path)
+
+    except subprocess.CalledProcessError:
+        await update.message.reply_text("❌ Не удалось скачать Pinterest контент")
+pdate.message.reply_text("⚠️ Ошибка Pinterest")
 
 # -------- Instagram Reels (yt-dlp + cookies) --------
 async def download_instagram(update, url):
