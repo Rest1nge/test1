@@ -179,12 +179,17 @@ async def download_pinterest(update, url):
 
 # ================= YouTube Shorts =================
 async def download_youtube_shorts(update, url):
+    if not os.path.exists(COOKIES_FILE):
+        await update.message.reply_text("❌ cookies.txt не найден")
+        return
+
     status = await update.message.reply_text("⏳ Скачиваю YouTube Shorts...")
 
     output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
 
     command = [
         "yt-dlp",
+        "--cookies", COOKIES_FILE,
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
         "-o", output,
         url
@@ -211,7 +216,10 @@ async def download_youtube_shorts(update, url):
 
     except subprocess.CalledProcessError:
         await status.delete()
-        await update.message.reply_text("❌ Не удалось скачать YouTube Shorts")
+        await update.message.reply_text(
+            "❌ Не удалось скачать YouTube Shorts\n"
+        )
+
 
 # ================= MAIN HANDLER =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
