@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import requests
 from flask import Flask
@@ -12,78 +13,86 @@ from telegram.ext import (
     filters
 )
 
-# ================== CONFIG ==================
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ================== FLASK ==================
+# ================= FLASK =================
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
     return "Bot is running", 200
 
-@app.route('/health')
+@app.route("/health")
 def health():
     return {"status": "healthy"}, 200
 
-# ================== TELEGRAM ==================
+# ================= UTILS =================
+def extract_urls(text: str):
+    return re.findall(r'(https?://[^\s]+)', text)
+
+async def get_full_url(url):
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=5)
+        return r.url
+    except:
+        return url
+
+# ================= COMMANDS =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
 🤖 *Multi Downloader Bot*
 
-Я умею скачивать:
-• *TikTok* — без водяного знака
-• *Pinterest* — фото и видео
-• *Instagram Reels* — стабильно (cookies)
+Поддержка:
+• TikTok (только видео)
+• Pinterest
+• Instagram Reels
 
 📌 Просто отправь ссылку
     """
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# -------- TikTok --------
+# ================= TikTok =================
 async def download_tiktok(update, url):
-    api_url = f"https://www.tikwm.com/api/?url={url}"
+    status = await update.message.reply_text("⏳ Скачиваю TikTok...")
 
     try:
+        api_url = f"https://www.tikwm.com/api/?url={url}"
         data = requests.get(api_url, timeout=15).json()
 
+        await status.delete()
+
         if data.get("code") != 0:
-            await update.message.reply_text("⚠️ TikTok контент не найден")
+            await update.message.reply_text("❌ TikTok видео не найдено")
             return
 
         content = data.get("data", {})
 
-        # 🎥 Если это видео
+        # Видео
         if content.get("play"):
-            await update.message.reply_video(
-                video=content["play"],
-                caption="✅ TikTok Video"
+            await update.message.reply_video(content["play"])
+            return
+
+        # Фото-пост — запрещаем
+        if content.get("images"):
+            await update.message.reply_text(
+                "❌ Скачивание фото из TikTok невозможно"
             )
             return
 
-        # 🖼 Если это фото-пост
-        images = content.get("images")
-        if images:
-            await update.message.reply_text("🖼 TikTok фото-пост")
+        await update.message.reply_text("❌ Не удалось определить тип TikTok контента")
 
-            for img in images[:10]:  # лимит Telegram
-                await update.message.reply_photo(img)
-
-            return
-
-        await update.message.reply_text("⚠️ Не удалось определить тип TikTok контента")
-
-    except Exception as e:
+    except Exception:
+        await status.delete()
         await update.message.reply_text("⚠️ Ошибка при загрузке TikTok")
 
-
-# -------- Pinterest --------
+# ================= Pinterest =================
 async def download_pinterest(update, url):
-    await update.message.reply_text("⏳ Скачиваю Pinterest...")
+    status = await update.message.reply_text("⏳ Скачиваю Pinterest...")
 
     output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
 
@@ -103,6 +112,8 @@ async def download_pinterest(update, url):
             reverse=True
         )
 
+        await status.delete()
+
         if not files:
             await update.message.reply_text("❌ Контент не найден")
             return
@@ -110,23 +121,23 @@ async def download_pinterest(update, url):
         path = os.path.join(DOWNLOAD_DIR, files[0])
 
         if path.endswith(".mp4"):
-            await update.message.reply_video(video=open(path, "rb"))
+            await update.message.reply_video(open(path, "rb"))
         else:
-            await update.message.reply_photo(photo=open(path, "rb"))
+            await update.message.reply_photo(open(path, "rb"))
 
         os.remove(path)
 
     except subprocess.CalledProcessError:
-        await update.message.reply_text("❌ Не удалось скачать Pinterest контент")
+        await status.delete()
+        await update.message.reply_text("❌ Не удалось скачать Pinterest")
 
-
-# -------- Instagram Reels (yt-dlp + cookies) --------
+# ================= Instagram =================
 async def download_instagram(update, url):
     if not os.path.exists(COOKIES_FILE):
         await update.message.reply_text("❌ cookies.txt не найден")
         return
 
-    await update.message.reply_text("⏳ Скачиваю Instagram Reel...")
+    status = await update.message.reply_text("⏳ Скачиваю Instagram Reel...")
 
     if "?" in url:
         url = url.split("?")[0]
@@ -151,47 +162,40 @@ async def download_instagram(update, url):
             reverse=True
         )
 
+        await status.delete()
+
         if not files:
             await update.message.reply_text("❌ Видео не найдено")
             return
 
-        video_path = os.path.join(DOWNLOAD_DIR, files[0])
-        await update.message.reply_video(video=open(video_path, "rb"))
-        os.remove(video_path)
+        path = os.path.join(DOWNLOAD_DIR, files[0])
+        await update.message.reply_video(open(path, "rb"))
+        os.remove(path)
 
     except subprocess.CalledProcessError:
-        await update.message.reply_text(
-            "❌ Не удалось скачать Reel\n"
-            "• Видео удалено\n"
-            "• Приватный доступ\n"
-            "• Cookies устарели"
-        )
+        await status.delete()
+        await update.message.reply_text("❌ Не удалось скачать Instagram Reel")
 
-# -------- URL Resolver --------
-async def get_full_url(url):
-    try:
-        r = requests.head(url, allow_redirects=True, timeout=5)
-        return r.url
-    except:
-        return url
-
-# -------- MAIN HANDLER --------
+# ================= MAIN HANDLER =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw_url = update.message.text.strip()
-    await update.message.reply_chat_action("typing")
+    urls = extract_urls(update.message.text)
 
-    url = await get_full_url(raw_url)
+    if not urls:
+        await update.message.reply_text("❌ Я не нашёл ссылок в сообщении")
+        return
+
+    url = await get_full_url(urls[0])
 
     if "tiktok.com" in url:
         await download_tiktok(update, url)
-    elif "pinterest.com" in url or "pin.it" in url:
-        await download_pinterest(update, url)
     elif "instagram.com/reel/" in url:
         await download_instagram(update, url)
+    elif "pinterest.com" in url or "pin.it" in url:
+        await download_pinterest(update, url)
     else:
         await update.message.reply_text("❌ Ссылка не поддерживается")
 
-# ================== START ==================
+# ================= START =================
 def run_flask():
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port)
