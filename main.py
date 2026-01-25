@@ -58,21 +58,33 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 # ================= загруз =================
 async def download_any(update, url):
+    for f in os.listdir(DOWNLOAD_DIR):
+    os.remove(os.path.join(DOWNLOAD_DIR, f))
+
     status = await update.message.reply_text("⏳ Скачиваю контент...")
 
-    output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
+    # 🔁 фикс для YouTube Shorts
+    if "youtube.com/shorts/" in url:
+        video_id = url.split("/shorts/")[1].split("?")[0]
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+    output = os.path.join(DOWNLOAD_DIR, "%(id)s_%(title).80s.%(ext)s")
 
     command = [
         "yt-dlp",
         "--no-check-certificate",
-        "--cookies", COOKIES_FILE if os.path.exists(COOKIES_FILE) else "",
+        "--yes-playlist",
+        "--write-thumbnail",
+        "--write-all-thumbnails",
         "--merge-output-format", "mp4",
+        "-f", "bv*+ba/best",
         "-o", output,
         url
     ]
 
-    # убираем пустой аргумент cookies
-    command = [c for c in command if c != ""]
+    if os.path.exists(COOKIES_FILE):
+        command.insert(1, "--cookies")
+        command.insert(2, COOKIES_FILE)
 
     try:
         subprocess.run(command, check=True)
@@ -90,22 +102,30 @@ async def download_any(update, url):
 
         for file in files:
             path = os.path.join(DOWNLOAD_DIR, file)
+            ext = file.lower()
 
-            if file.lower().endswith((".mp4", ".mov", ".webm")):
+            if ext.endswith((".mp4", ".mov", ".webm")):
                 await update.message.reply_video(
                     open(path, "rb"),
                     caption="скачано с помощью @instbotsavebot"
                 )
-            elif file.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+
+            elif ext.endswith((".jpg", ".jpeg", ".png")):
                 await update.message.reply_photo(open(path, "rb"))
+
+            elif ext.endswith(".webp"):
+                await update.message.reply_document(open(path, "rb"))
+
             else:
                 await update.message.reply_document(open(path, "rb"))
 
             os.remove(path)
 
-    except subprocess.CalledProcessError:
+    except Exception as e:
         await status.delete()
         await update.message.reply_text("❌ Ошибка при скачивании")
+        print(e)
+
 
 # ================= MAIN HANDLER =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
