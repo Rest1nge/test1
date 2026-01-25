@@ -49,15 +49,15 @@ def clean_downloads():
 # ================= COMMANDS =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Отправь ссылку — я скачаю фото или видео\n\n"
+        "🤖 Отправь ссылку — скачаю фото или видео\n\n"
         "Поддержка:\n"
         "• TikTok\n"
-        "• Instagram\n"
+        "• Instagram (post / reel)\n"
         "• Pinterest\n"
         "• YouTube Shorts"
     )
 
-# ================= CORE DOWNLOAD =================
+# ================= CORE =================
 async def download_any(update, url):
     status = await update.message.reply_text("⏳ Скачиваю контент...")
 
@@ -66,7 +66,7 @@ async def download_any(update, url):
         vid = url.split("/shorts/")[1].split("?")[0]
         url = f"https://www.youtube.com/watch?v={vid}"
 
-    # Pinterest sent/invite → clean pin URL
+    # Pinterest clean
     if "pinterest.com" in url and "/pin/" in url:
         m = re.search(r"/pin/(\d+)", url)
         if m:
@@ -80,6 +80,7 @@ async def download_any(update, url):
         "yt-dlp",
         "--no-check-certificate",
         "--yes-playlist",
+        "--ignore-errors",
         "-o", output,
         url
     ]
@@ -88,19 +89,33 @@ async def download_any(update, url):
         base_cmd.insert(1, "--cookies")
         base_cmd.insert(2, COOKIES_FILE)
 
-    # === TRY VIDEO FIRST ===
-    result = subprocess.run(
-        base_cmd + ["-f", "bv*+ba/best", "--merge-output-format", "mp4"],
-        stderr=subprocess.PIPE
-    )
-
-    # === IF NO VIDEO → IMAGES ===
-    if result.returncode != 0 and b"No video formats found" in result.stderr:
+    # ============ PINTEREST ============
+    if "pinterest.com" in url:
         subprocess.run(
             base_cmd + [
                 "--no-video",
                 "--extractor-args", "pinterest:download_images=true",
                 "--convert-thumbnails", "jpg"
+            ],
+            check=False
+        )
+
+    # ============ INSTAGRAM POST ============
+    elif "instagram.com/p/" in url:
+        subprocess.run(
+            base_cmd + [
+                "--no-video",
+                "--write-all-thumbnails",
+                "--convert-thumbnails", "jpg"
+            ],
+            check=False
+        )
+
+    # ============ INSTAGRAM REEL / OTHER ============
+    else:
+        subprocess.run(
+            base_cmd + [
+                "--merge-output-format", "mp4"
             ],
             check=False
         )
@@ -132,7 +147,7 @@ async def download_any(update, url):
 
         os.remove(path)
 
-# ================= MAIN HANDLER =================
+# ================= HANDLER =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = extract_urls(update.message.text)
 
