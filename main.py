@@ -60,7 +60,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_any(update, url):
     status = await update.message.reply_text("⏳ Скачиваю контент...")
 
-    # фикс Shorts
+    # фикс YouTube Shorts
     if "youtube.com/shorts/" in url:
         vid = url.split("/shorts/")[1].split("?")[0]
         url = f"https://www.youtube.com/watch?v={vid}"
@@ -71,7 +71,6 @@ async def download_any(update, url):
         "yt-dlp",
         "--no-check-certificate",
         "--yes-playlist",
-        "--merge-output-format", "mp4",
         "-o", output,
         url
     ]
@@ -80,22 +79,28 @@ async def download_any(update, url):
         base_cmd.insert(1, "--cookies")
         base_cmd.insert(2, COOKIES_FILE)
 
+    # 🧹 чистим папку
+    for f in os.listdir(DOWNLOAD_DIR):
+        os.remove(os.path.join(DOWNLOAD_DIR, f))
+
     try:
         # 1️⃣ ПРОБУЕМ ВИДЕО
         subprocess.run(
-            base_cmd + ["-f", "bv*+ba/best"],
+            base_cmd + [
+                "-f", "bv*+ba/best",
+                "--merge-output-format", "mp4"
+            ],
             check=True,
             stderr=subprocess.PIPE
         )
 
     except subprocess.CalledProcessError as e:
-        # 2️⃣ ЕСЛИ ВИДЕО НЕТ → ФОТО
+        # 2️⃣ ЕСЛИ ВИДЕО НЕТ → ФОТО / ИЗОБРАЖЕНИЯ
         if b"No video formats found" in e.stderr:
             subprocess.run(
                 base_cmd + [
-                    "--skip-download",
-                    "--write-thumbnail",
-                    "--write-all-thumbnails",
+                    "--no-video",
+                    "--extractor-args", "pinterest:download_images=true",
                     "--convert-thumbnails", "jpg"
                 ],
                 check=True
