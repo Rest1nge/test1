@@ -1,26 +1,19 @@
 import os
 import re
-import subprocess
 import requests
 from flask import Flask
 from threading import Thread
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CommandHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import subprocess
+import instaloader
 
-# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -31,137 +24,109 @@ def home():
 def health():
     return {"status": "healthy"}, 200
 
-# ================= UTILS =================
 def extract_urls(text: str):
-    return re.findall(r'(https?://[^\s]+)', text)
-
-async def get_full_url(url):
-    try:
-        r = requests.head(url, allow_redirects=True, timeout=5)
-        return r.url
-    except:
-        return url
+    return re.findall(r"(https?://[^\s]+)", text)
 
 def clean_downloads():
     for f in os.listdir(DOWNLOAD_DIR):
         os.remove(os.path.join(DOWNLOAD_DIR, f))
 
-# ================= COMMANDS =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Отправь ссылку — скачаю фото или видео\n\n"
-        "Поддержка:\n"
-        "• TikTok\n"
-        "• Instagram (post / reel)\n"
-        "• Pinterest\n"
-        "• YouTube Shorts"
+        "🤖 Отправь ссылку — я скачаю фото или видео.\nПоддержка:\n"
+        "• TikTok\n• Instagram\n• Pinterest\n• YouTube Shorts"
     )
 
-# ================= CORE =================
-async def download_any(update, url):
-    status = await update.message.reply_text("⏳ Скачиваю контент...")
+# ===========================
+# Download functions
+# ===========================
 
-    # YouTube Shorts → watch
-    if "youtube.com/shorts/" in url:
-        vid = url.split("/shorts/")[1].split("?")[0]
-        url = f"https://www.youtube.com/watch?v={vid}"
+async def download_tiktok(url):
+    # yt-dlp
+    output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
+    cmd = ["yt-dlp", "-f", "bv*+ba/best", "--merge-output-format", "mp4", "-o", output, url]
+    subprocess.run(cmd, check=False)
+    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
 
-    # Pinterest clean
-    if "pinterest.com" in url and "/pin/" in url:
-        m = re.search(r"/pin/(\d+)", url)
-        if m:
-            url = f"https://www.pinterest.com/pin/{m.group(1)}/"
+async def download_youtube(url):
+    output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
+    cmd = ["yt-dlp", "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", output, url]
+    subprocess.run(cmd, check=False)
+    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
 
+async def download_instagram_post(url):
     clean_downloads()
+    L = instaloader.Instaloader(download_videos=True, download_comments=False, save_metadata=False, dirname_pattern=DOWNLOAD_DIR)
+    try:
+        shortcode = url.rstrip("/").split("/")[-1]
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        L.download_post(post, target=DOWNLOAD_DIR)
+    except Exception as e:
+        print("Instagram error:", e)
+    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
 
-    output = os.path.join(DOWNLOAD_DIR, "%(id)s_%(title).80s.%(ext)s")
+async def download_pinterest(url):
+    clean_downloads()
+    # Pinterest image only: get direct image URL
+    try:
+        r = requests.get(url, timeout=10).text
+        img_urls = re.findall(r'"images":\{"orig":\{"url":"(https:[^"]+)"\}', r)
+        for i, img_url in enumerate(img_urls):
+            ext = img_url.split(".")[-1].split("?")[0]
+            path = os.path.join(DOWNLOAD_DIR, f"pin_{i}.{ext}")
+            with open(path, "wb") as f:
+                f.write(requests.get(img_url).content)
+    except:
+        pass
+    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
 
-    base_cmd = [
-        "yt-dlp",
-        "--no-check-certificate",
-        "--yes-playlist",
-        "--ignore-errors",
-        "-o", output,
-        url
-    ]
+# ===========================
+# Main handler
+# ===========================
 
-    if os.path.exists(COOKIES_FILE):
-        base_cmd.insert(1, "--cookies")
-        base_cmd.insert(2, COOKIES_FILE)
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    urls = extract_urls(update.message.text)
+    if not urls:
+        await update.message.reply_text("❌ Ссылки не найдено")
+        return
 
-    # ============ PINTEREST ============
-    if "pinterest.com" in url:
-        subprocess.run(
-            base_cmd + [
-                "--no-video",
-                "--extractor-args", "pinterest:download_images=true",
-                "--convert-thumbnails", "jpg"
-            ],
-            check=False
-        )
+    url = urls[0]
+    clean_downloads()
+    files = []
 
-    # ============ INSTAGRAM POST ============
+    if "tiktok.com" in url:
+        files = await download_tiktok(url)
+    elif "youtube.com" in url or "youtu.be" in url:
+        files = await download_youtube(url)
     elif "instagram.com/p/" in url:
-        subprocess.run(
-            base_cmd + [
-                "--no-video",
-                "--write-all-thumbnails",
-                "--convert-thumbnails", "jpg"
-            ],
-            check=False
-        )
-
-    # ============ INSTAGRAM REEL / OTHER ============
+        files = await download_instagram_post(url)
+    elif "pinterest.com" in url:
+        files = await download_pinterest(url)
     else:
-        subprocess.run(
-            base_cmd + [
-                "--merge-output-format", "mp4"
-            ],
-            check=False
-        )
-
-    files = sorted(
-        os.listdir(DOWNLOAD_DIR),
-        key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x))
-    )
-
-    await status.delete()
+        await update.message.reply_text("❌ Платформа не поддерживается")
+        return
 
     if not files:
         await update.message.reply_text("❌ Контент не найден")
         return
 
-    for file in files:
-        path = os.path.join(DOWNLOAD_DIR, file)
-        ext = file.lower()
-
+    for f in files:
+        path = os.path.join(DOWNLOAD_DIR, f)
+        ext = f.lower()
         if ext.endswith((".mp4", ".webm", ".mov")):
-            await update.message.reply_video(
-                open(path, "rb"),
-                caption="скачано с помощью @instbotsavebot"
-            )
+            await update.message.reply_video(open(path, "rb"), caption="скачано с помощью @instbotsavebot")
         elif ext.endswith((".jpg", ".jpeg", ".png")):
             await update.message.reply_photo(open(path, "rb"))
         else:
             await update.message.reply_document(open(path, "rb"))
-
         os.remove(path)
 
-# ================= HANDLER =================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    urls = extract_urls(update.message.text)
+# ===========================
+# Start bot
+# ===========================
 
-    if not urls:
-        await update.message.reply_text("❌ Я не нашёл ссылку")
-        return
-
-    url = await get_full_url(urls[0])
-    await download_any(update, url)
-
-# ================= START =================
 def run_flask():
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
 
 def main():
     if not BOT_TOKEN:
@@ -169,12 +134,10 @@ def main():
         return
 
     Thread(target=run_flask, daemon=True).start()
-
-    bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    bot.add_handler(CommandHandler("start", start_command))
-    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    bot.run_polling(allowed_updates=Update.ALL_TYPES)
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start_command))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
