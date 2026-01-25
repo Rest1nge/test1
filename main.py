@@ -58,73 +58,81 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 # ================= загруз =================
 async def download_any(update, url):
-    
-
     status = await update.message.reply_text("⏳ Скачиваю контент...")
 
-    # 🔁 фикс для YouTube Shorts
+    # фикс Shorts
     if "youtube.com/shorts/" in url:
-        video_id = url.split("/shorts/")[1].split("?")[0]
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        vid = url.split("/shorts/")[1].split("?")[0]
+        url = f"https://www.youtube.com/watch?v={vid}"
 
     output = os.path.join(DOWNLOAD_DIR, "%(id)s_%(title).80s.%(ext)s")
 
-    command = [
+    base_cmd = [
         "yt-dlp",
         "--no-check-certificate",
         "--yes-playlist",
-        "--write-thumbnail",
-        "--write-all-thumbnails",
         "--merge-output-format", "mp4",
-        "-f", "bv*+ba/best",
         "-o", output,
         url
     ]
 
     if os.path.exists(COOKIES_FILE):
-        command.insert(1, "--cookies")
-        command.insert(2, COOKIES_FILE)
+        base_cmd.insert(1, "--cookies")
+        base_cmd.insert(2, COOKIES_FILE)
 
     try:
-        subprocess.run(command, check=True)
-
-        files = sorted(
-            os.listdir(DOWNLOAD_DIR),
-            key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x))
+        # 1️⃣ ПРОБУЕМ ВИДЕО
+        subprocess.run(
+            base_cmd + ["-f", "bv*+ba/best"],
+            check=True,
+            stderr=subprocess.PIPE
         )
 
-        await status.delete()
-
-        if not files:
-            await update.message.reply_text("❌ Контент не найден")
+    except subprocess.CalledProcessError as e:
+        # 2️⃣ ЕСЛИ ВИДЕО НЕТ → ФОТО
+        if b"No video formats found" in e.stderr:
+            subprocess.run(
+                base_cmd + [
+                    "--skip-download",
+                    "--write-thumbnail",
+                    "--write-all-thumbnails",
+                    "--convert-thumbnails", "jpg"
+                ],
+                check=True
+            )
+        else:
+            await status.delete()
+            await update.message.reply_text("❌ Ошибка загрузки")
             return
 
-        for file in files:
-            path = os.path.join(DOWNLOAD_DIR, file)
-            ext = file.lower()
+    files = sorted(
+        os.listdir(DOWNLOAD_DIR),
+        key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x))
+    )
 
-            if ext.endswith((".mp4", ".mov", ".webm")):
-                await update.message.reply_video(
-                    open(path, "rb"),
-                    caption="скачано с помощью @instbotsavebot"
-                )
+    await status.delete()
 
-            elif ext.endswith((".jpg", ".jpeg", ".png")):
-                await update.message.reply_photo(open(path, "rb"))
+    if not files:
+        await update.message.reply_text("❌ Контент не найден")
+        return
 
-            elif ext.endswith(".webp"):
-                await update.message.reply_document(open(path, "rb"))
+    for file in files:
+        path = os.path.join(DOWNLOAD_DIR, file)
+        ext = file.lower()
 
-            else:
-                await update.message.reply_document(open(path, "rb"))
+        if ext.endswith((".mp4", ".webm", ".mov")):
+            await update.message.reply_video(
+                open(path, "rb"),
+                caption="скачано с помощью @instbotsavebot"
+            )
 
-            os.remove(path)
+        elif ext.endswith((".jpg", ".jpeg", ".png")):
+            await update.message.reply_photo(open(path, "rb"))
 
-    except Exception as e:
-        await status.delete()
-        await update.message.reply_text("❌ Ошибка при скачивании")
-        print(e)
+        else:
+            await update.message.reply_document(open(path, "rb"))
 
+        os.remove(path)
 
 # ================= MAIN HANDLER =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
