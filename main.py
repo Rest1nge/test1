@@ -56,14 +56,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📌 Просто отправь ссылку
     """
     await update.message.reply_text(text, parse_mode="Markdown")
-# ================= загруз =================
+
+# ================= CORE DOWNLOAD =================
 async def download_any(update, url):
     status = await update.message.reply_text("⏳ Скачиваю контент...")
 
-    # фикс YouTube Shorts
+    # YouTube Shorts → watch
     if "youtube.com/shorts/" in url:
         vid = url.split("/shorts/")[1].split("?")[0]
         url = f"https://www.youtube.com/watch?v={vid}"
+
+    # Pinterest sent/invite → clean pin URL
+    if "pinterest.com" in url and "/pin/" in url:
+        m = re.search(r"/pin/(\d+)", url)
+        if m:
+            url = f"https://www.pinterest.com/pin/{m.group(1)}/"
+
+    clean_downloads()
 
     output = os.path.join(DOWNLOAD_DIR, "%(id)s_%(title).80s.%(ext)s")
 
@@ -79,36 +88,22 @@ async def download_any(update, url):
         base_cmd.insert(1, "--cookies")
         base_cmd.insert(2, COOKIES_FILE)
 
-    # 🧹 чистим папку
-    for f in os.listdir(DOWNLOAD_DIR):
-        os.remove(os.path.join(DOWNLOAD_DIR, f))
+    # === TRY VIDEO FIRST ===
+    result = subprocess.run(
+        base_cmd + ["-f", "bv*+ba/best", "--merge-output-format", "mp4"],
+        stderr=subprocess.PIPE
+    )
 
-    try:
-        # 1️⃣ ПРОБУЕМ ВИДЕО
+    # === IF NO VIDEO → IMAGES ===
+    if result.returncode != 0 and b"No video formats found" in result.stderr:
         subprocess.run(
             base_cmd + [
-                "-f", "bv*+ba/best",
-                "--merge-output-format", "mp4"
+                "--no-video",
+                "--extractor-args", "pinterest:download_images=true",
+                "--convert-thumbnails", "jpg"
             ],
-            check=True,
-            stderr=subprocess.PIPE
+            check=False
         )
-
-    except subprocess.CalledProcessError as e:
-        # 2️⃣ ЕСЛИ ВИДЕО НЕТ → ФОТО / ИЗОБРАЖЕНИЯ
-        if b"No video formats found" in e.stderr:
-            subprocess.run(
-                base_cmd + [
-                    "--no-video",
-                    "--extractor-args", "pinterest:download_images=true",
-                    "--convert-thumbnails", "jpg"
-                ],
-                check=True
-            )
-        else:
-            await status.delete()
-            await update.message.reply_text("❌ Ошибка загрузки")
-            return
 
     files = sorted(
         os.listdir(DOWNLOAD_DIR),
@@ -130,10 +125,8 @@ async def download_any(update, url):
                 open(path, "rb"),
                 caption="скачано с помощью @instbotsavebot"
             )
-
         elif ext.endswith((".jpg", ".jpeg", ".png")):
             await update.message.reply_photo(open(path, "rb"))
-
         else:
             await update.message.reply_document(open(path, "rb"))
 
