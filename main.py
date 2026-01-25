@@ -1,19 +1,22 @@
 import os
 import re
 import requests
+import subprocess
+from urllib.parse import urlparse
 from flask import Flask
 from threading import Thread
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import subprocess
 import instaloader
 
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -24,6 +27,7 @@ def home():
 def health():
     return {"status": "healthy"}, 200
 
+# ================= UTILS =================
 def extract_urls(text: str):
     return re.findall(r"(https?://[^\s]+)", text)
 
@@ -31,18 +35,15 @@ def clean_downloads():
     for f in os.listdir(DOWNLOAD_DIR):
         os.remove(os.path.join(DOWNLOAD_DIR, f))
 
+# ================= COMMANDS =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Отправь ссылку — я скачаю фото или видео.\nПоддержка:\n"
-        "• TikTok\n• Instagram\n• Pinterest\n• YouTube Shorts"
+        "• TikTok\n• Instagram (Post / Reel)\n• Pinterest\n• YouTube Shorts"
     )
 
-# ===========================
-# Download functions
-# ===========================
-
+# ================= DOWNLOAD FUNCTIONS =================
 async def download_tiktok(url):
-    # yt-dlp
     output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
     cmd = ["yt-dlp", "-f", "bv*+ba/best", "--merge-output-format", "mp4", "-o", output, url]
     subprocess.run(cmd, check=False)
@@ -67,7 +68,7 @@ async def download_instagram_post(url):
 
 async def download_pinterest(url):
     clean_downloads()
-    # Pinterest image only: get direct image URL
+    files = []
     try:
         r = requests.get(url, timeout=10).text
         img_urls = re.findall(r'"images":\{"orig":\{"url":"(https:[^"]+)"\}', r)
@@ -76,14 +77,18 @@ async def download_pinterest(url):
             path = os.path.join(DOWNLOAD_DIR, f"pin_{i}.{ext}")
             with open(path, "wb") as f:
                 f.write(requests.get(img_url).content)
+            files.append(path)
     except:
         pass
-    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
+    # Видео через yt-dlp
+    if not files:
+        output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
+        cmd = ["yt-dlp", "-f", "bv*+ba/best", "--merge-output-format", "mp4", "-o", output, url]
+        subprocess.run(cmd, check=False)
+        files = sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
+    return files
 
-# ===========================
-# Main handler
-# ===========================
-
+# ================= MESSAGE HANDLER =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = extract_urls(update.message.text)
     if not urls:
@@ -94,13 +99,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_downloads()
     files = []
 
-    if "tiktok.com" in url:
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    path = parsed.path
+
+    # ===== Platform selection =====
+    if "tiktok.com" in domain:
         files = await download_tiktok(url)
-    elif "youtube.com" in url or "youtu.be" in url:
+    elif "youtube.com" in domain or "youtu.be" in domain:
         files = await download_youtube(url)
-    elif "instagram.com/p/" in url:
-        files = await download_instagram_post(url)
-    elif "pinterest.com" in url:
+    elif "instagram.com" in domain:
+        if path.startswith("/p/"):
+            files = await download_instagram_post(url)
+        elif path.startswith("/reel/"):
+            files = await download_youtube(url)
+        else:
+            await update.message.reply_text("❌ Instagram: неизвестный формат")
+            return
+    elif "pinterest.com" in domain:
         files = await download_pinterest(url)
     else:
         await update.message.reply_text("❌ Платформа не поддерживается")
@@ -110,6 +126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Контент не найден")
         return
 
+    # ===== Send files =====
     for f in files:
         path = os.path.join(DOWNLOAD_DIR, f)
         ext = f.lower()
@@ -121,10 +138,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(open(path, "rb"))
         os.remove(path)
 
-# ===========================
-# Start bot
-# ===========================
-
+# ================= START BOT =================
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
 
