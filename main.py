@@ -58,8 +58,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 # ================= загруз =================
 async def download_any(update, url):
-    for f in os.listdir(DOWNLOAD_DIR):
-    os.remove(os.path.join(DOWNLOAD_DIR, f))
+    
 
     status = await update.message.reply_text("⏳ Скачиваю контент...")
 
