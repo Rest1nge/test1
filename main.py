@@ -42,20 +42,20 @@ async def get_full_url(url):
     except:
         return url
 
+def clean_downloads():
+    for f in os.listdir(DOWNLOAD_DIR):
+        os.remove(os.path.join(DOWNLOAD_DIR, f))
+
 # ================= COMMANDS =================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = """
-🤖 *Multi Downloader Bot*
-
-Поддержка:
-• TikTok (только видео)
-• Instagram Reels (без фото)
-• Pinterest (только видео)
-• YouTube Shorts
-
-📌 Просто отправь ссылку
-    """
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(
+        "🤖 Отправь ссылку — я скачаю фото или видео\n\n"
+        "Поддержка:\n"
+        "• TikTok\n"
+        "• Instagram\n"
+        "• Pinterest\n"
+        "• YouTube Shorts"
+    )
 
 # ================= CORE DOWNLOAD =================
 async def download_any(update, url):
@@ -137,11 +137,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = extract_urls(update.message.text)
 
     if not urls:
-        await update.message.reply_text("❌ Я не нашёл ссылок в сообщении")
+        await update.message.reply_text("❌ Я не нашёл ссылку")
         return
 
     url = await get_full_url(urls[0])
-
     await download_any(update, url)
 
 # ================= START =================
