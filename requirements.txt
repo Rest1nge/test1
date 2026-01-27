@@ -4,3 +4,6 @@ yt-dlp
 requests
 flask
 instaloader
+pyTelegramBotAPI 
+instaloader 
+beautifulsoup4
