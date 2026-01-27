@@ -5,45 +5,52 @@ from bs4 import BeautifulSoup
 import instaloader
 import re
 import shutil
+import http.cookiejar
 from flask import Flask
 from threading import Thread
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-INSTA_SESSION_ID = os.environ.get('INSTA_SESSION_ID') 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+COOKIE_FILE = 'cookies.txt'
 
 bot = telebot.TeleBot(BOT_TOKEN)
 L = instaloader.Instaloader(user_agent=USER_AGENT)
 
-# --- FLASK СЕРВЕР (Логика из Кода 2) ---
+# --- FLASK СЕРВЕР ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running via Cookies!", 200
+    return "Bot is running with cookies.txt!", 200
 
 @app.route("/health")
 def health():
     return {"status": "healthy"}, 200
 
 def run_flask():
-    # Используем порт 3000 или 8080 в зависимости от настроек окружения
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- НАСТРОЙКА INSTAGRAM ---
-if INSTA_SESSION_ID:
+# --- НАСТРОЙКА INSTAGRAM ЧЕРЕЗ COOKIES.TXT ---
+if os.path.exists(COOKIE_FILE):
     try:
-        print("Настраиваем сессию через Cookie...")
-        L.context._session.cookies.set('sessionid', INSTA_SESSION_ID)
+        print(f"Загружаем сессию из {COOKIE_FILE}...")
+        cj = http.cookiejar.MozillaCookieJar(COOKIE_FILE)
+        cj.load(ignore_discard=True, ignore_expires=True)
+        L.context._session.cookies.update(cj)
         L.context._session.headers.update({'User-Agent': USER_AGENT})
+        
+        # Проверка логина (может кинуть ошибку, если куки протухли)
         username = L.test_login()
-        print(f"Успешно авторизованы как: {username}")
+        if username:
+            print(f"Успешная авторизация: {username}")
+        else:
+            print("Предупреждение: L.test_login() не вернул имя пользователя.")
     except Exception as e:
-        print(f"Ошибка cookie-авторизации: {e}")
+        print(f"Ошибка при чтении cookies.txt: {e}")
 else:
-    print("ВНИМАНИЕ: Cookie не найдены!")
+    print(f"ВНИМАНИЕ: Файл {COOKIE_FILE} не найден в репозитории!")
 
 DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
@@ -69,19 +76,16 @@ def download_pinterest(url, chat_id):
 
 def download_instagram(url, chat_id):
     try:
-        shortcode_match = re.search(r'/(p|reel)/([^/?#&]+)', url) 
+        # Извлекаем шорткод из ссылки
+        shortcode_match = re.search(r'/(p|reel|tv)/([^/?#&]+)', url) 
         if not shortcode_match: return None
         shortcode = shortcode_match.group(2)
         
+        # Получаем данные поста без скачивания файлов на диск
         post = instaloader.Post.from_shortcode(L.context, shortcode)
-        target_dir = f"{DOWNLOAD_FOLDER}/{chat_id}_insta"
-        L.download_post(post, target=target_dir)
         
-        for root, dirs, files in os.walk(target_dir):
-            for file in files:
-                if file.endswith(".jpg"):
-                    return os.path.join(root, file)
-        return None
+        # Если это видео, можно взять post.video_url, но для фото берем post.url
+        return post.url
     except Exception as e:
         print(f"Instagram Error: {e}")
         return None
@@ -102,21 +106,21 @@ def handle_message(message):
             bot.send_message(chat_id, "Ошибка Pinterest.")
 
     elif "instagram.com" in url:
-        bot.send_message(chat_id, "Instagram: качаю...")
-        path = download_instagram(url, chat_id)
-        if path:
-            with open(path, 'rb') as f: bot.send_photo(chat_id, f)
-            if os.path.exists(os.path.dirname(path)):
-                shutil.rmtree(os.path.dirname(path))
+        bot.send_message(chat_id, "Instagram: обрабатываю ссылку...")
+        insta_url = download_instagram(url, chat_id)
+        if insta_url:
+            try:
+                # Отправляем фото напрямую по URL, Telegram сам его загрузит
+                bot.send_photo(chat_id, insta_url)
+            except Exception as e:
+                bot.send_message(chat_id, f"Ошибка при отправке фото: {e}")
         else:
-            bot.send_message(chat_id, "Не удалось скачать. Проверьте ссылку или куки бота.")
+            bot.send_message(chat_id, "Не удалось получить контент. Возможно, куки устарели.")
     else:
-        bot.send_message(chat_id, "Жду ссылку на Instagram или Pinterest...")
+        bot.send_message(chat_id, "Отправьте ссылку на Instagram или Pinterest.")
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
-    # Запускаем Flask в отдельном потоке (daemon=True позволяет завершить поток при выходе)
     Thread(target=run_flask, daemon=True).start()
-    
-    print("Бот запущен...")
+    print("Бот запущен с использованием cookies.txt...")
     bot.infinity_polling()
