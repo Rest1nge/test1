@@ -18,19 +18,15 @@ bot = telebot.TeleBot(BOT_TOKEN)
 L = instaloader.Instaloader(user_agent=USER_AGENT)
 
 # --- ФЕЙКОВЫЙ СЕРВЕР (Для Render) ---
-app = Flask('')
+app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "Bot is running via Cookies!"
+    return "Bot is running", 200
 
-def run_http():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_http)
-    t.start()
+@app.route("/health")
+def health():
+    return {"status": "healthy"}, 200
 
 # --- НАСТРОЙКА INSTAGRAM (ЧЕРЕЗ COOKIES) ---
 if INSTA_SESSION_ID:
@@ -119,6 +115,9 @@ def handle_message(message):
     else:
         bot.send_message(chat_id, "Жду ссылку...")
 
+def run_flask():
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host="0.0.0.0", port=port)
+
 if __name__ == '__main__':
-    keep_alive()
-    bot.infinity_polling()
+    bot.run_polling(allowed_updates=Update.ALL_TYPES)
