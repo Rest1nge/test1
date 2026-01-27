@@ -1,173 +1,204 @@
-import telebot
 import os
-import requests
-from bs4 import BeautifulSoup
-import instaloader
 import re
-import shutil
-import http.cookiejar
-import json
+import subprocess
+import requests
+import instaloader
 from flask import Flask
 from threading import Thread
-from telebot import types
+from bs4 import BeautifulSoup
+from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters
+)
 
-# --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
-COOKIE_FILE = 'cookies.txt'
+# ================= CONFIG =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DOWNLOAD_DIR = "downloads"
+COOKIES_FILE = "cookies.txt"
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+CAPTION_TEXT = "<i>скачано с помощью @tiktokbroskibot</i>"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Настройка Instaloader
 L = instaloader.Instaloader(user_agent=USER_AGENT)
+if os.path.exists(COOKIES_FILE):
+    try:
+        # Пытаемся загрузить сессию для Instagram фото/каруселей
+        L.load_session_from_file("user", filename=COOKIES_FILE)
+    except:
+        print("Instaloader: Сессия не загружена, работаем в анонимном режиме")
 
-# --- FLASK СЕРВЕР (Оригинальная структура) ---
+# ================= FLASK (из второго кода) =================
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "Bot is running via Cookies with Carousel support!", 200
+    return "Bot is running", 200
 
 @app.route("/health")
 def health():
     return {"status": "healthy"}, 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    # Используем порт 3000, как в запросе
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host="0.0.0.0", port=port)
 
-# --- НАСТРОЙКА INSTAGRAM ---
-def setup_instagram():
-    if os.path.exists(COOKIE_FILE):
-        try:
-            cj = http.cookiejar.MozillaCookieJar(COOKIE_FILE)
-            cj.load(ignore_discard=True, ignore_expires=True)
-            L.context._session.cookies.update(cj)
-            L.context._session.headers.update({'User-Agent': USER_AGENT})
-            username = L.test_login()
-            if username:
-                print(f"Instagram: авторизован как {username}")
-        except Exception as e:
-            print(f"Instagram Auth Error: {e}")
+# ================= UTILS =================
+def extract_urls(text: str):
+    return re.findall(r'(https?://[^\s]+)', text)
 
-setup_instagram()
-
-# --- ЛОГИКА ИЗВЛЕЧЕНИЯ КОНТЕНТА ---
-
-def get_pinterest_content(url):
+async def get_full_url(url):
     try:
-        headers = {'User-Agent': USER_AGENT}
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.status_code != 200: return None
-        
-        soup = BeautifulSoup(res.content, 'html.parser')
-        script_tag = soup.find('script', id='__PWS_DATA__')
-        
-        images = []
-        if script_tag:
-            try:
-                data = json.loads(script_tag.string)
-                # Пытаемся найти изображения в структуре Story Pin (Idea Pin)
-                pins = data.get('props', {}).get('initialReduxState', {}).get('pins', {})
-                for pin_id in pins:
-                    pin_data = pins[pin_id]
-                    # Проверяем наличие страниц карусели
-                    story_pages = pin_data.get('story_pin_data', {}).get('pages', [])
-                    if story_pages:
-                        for page in story_pages:
-                            img_url = page.get('blocks', [{}])[0].get('image', {}).get('images', {}).get('originals', {}).get('url')
-                            if img_url: images.append({'url': img_url, 'is_video': False})
-                    
-                    # Если страниц нет, берем основное фото
-                    if not images:
-                        main_img = pin_data.get('images', {}).get('orig', {}).get('url')
-                        if main_img: images.append({'url': main_img, 'is_video': False})
-            except:
-                pass
+        r = requests.head(url, allow_redirects=True, timeout=5)
+        return r.url
+    except:
+        return url
 
-        # Резервный вариант через OpenGraph, если JSON не отдался
-        if not images:
-            meta_img = soup.find('meta', property='og:image')
-            if meta_img: images.append({'url': meta_img['content'], 'is_video': False})
-            
-        return images if images else None
-    except Exception as e:
-        print(f"Pinterest Error: {e}")
-        return None
+# ================= DOWNLOAD LOGIC =================
 
-def get_tiktok_content(url):
+async def download_tiktok(update: Update, url: str):
+    await update.message.reply_text("⏳ Скачиваю TikTok...")
     try:
         api_url = f"https://www.tikwm.com/api/?url={url}"
-        response = requests.get(api_url).json()
-        data = response.get('data')
-        if not data: return None
+        data = requests.get(api_url, timeout=15).json().get('data')
         
-        if 'images' in data and data['images']:
-            return [{'url': img, 'is_video': False} for img in data['images']]
-        if 'play' in data:
-            return [{'url': data['play'], 'is_video': True}]
-        return None
-    except Exception as e:
-        print(f"TikTok Error: {e}")
-        return None
+        if not data:
+            await update.message.reply_text("❌ TikTok контент не найден")
+            return
 
-def get_insta_content(url):
+        if 'images' in data and data['images']:
+            media = [InputMediaPhoto(img, caption=CAPTION_TEXT if i == 0 else "", parse_mode=ParseMode.HTML) 
+                     for i, img in enumerate(data['images'][:10])]
+            await update.message.reply_media_group(media)
+        else:
+            await update.message.reply_video(data['play'], caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text("⚠️ Ошибка при загрузке TikTok")
+
+async def download_instagram(update: Update, url: str):
+    await update.message.reply_text("⏳ Скачиваю Instagram...")
+    
+    # Сначала пробуем Reels через yt-dlp
+    output = os.path.join(DOWNLOAD_DIR, "insta_%(id)s.%(ext)s")
+    command = [
+        "yt-dlp", "--cookies", COOKIES_FILE,
+        "--no-check-certificate",
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
+        "-o", output, url
+    ]
+    
     try:
-        match = re.search(r'/(p|reel|tv)/([^/?#&]+)', url)
-        if not match: return None
-        post = instaloader.Post.from_shortcode(L.context, match.group(2))
+        result = subprocess.run(command, capture_output=True, timeout=60)
+        files = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith("insta_")]
+        if files:
+            path = os.path.join(DOWNLOAD_DIR, files[0])
+            await update.message.reply_video(video=open(path, "rb"), caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
+            os.remove(path)
+            return
+    except:
+        pass
+
+    # Если не видео или yt-dlp не справился — скачиваем фото/карусели через Instaloader
+    try:
+        shortcode = re.search(r'/(p|reel|tv)/([^/?#&]+)', url).group(2)
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
         
         if post.typename == 'GraphSidecar':
-            return [{'url': n.video_url if n.is_video else n.display_url, 'is_video': n.is_video} for n in post.get_sidecar_nodes()]
-        return [{'url': post.video_url if post.is_video else post.url, 'is_video': post.is_video}]
+            media = []
+            for i, node in enumerate(post.get_sidecar_nodes()):
+                if i >= 10: break
+                cap = CAPTION_TEXT if i == 0 else ""
+                if node.is_video:
+                    media.append(InputMediaVideo(node.video_url, caption=cap, parse_mode=ParseMode.HTML))
+                else:
+                    media.append(InputMediaPhoto(node.display_url, caption=cap, parse_mode=ParseMode.HTML))
+            await update.message.reply_media_group(media)
+        elif post.is_video:
+            await update.message.reply_video(post.video_url, caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_photo(post.url, caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
     except Exception as e:
-        print(f"Instagram Error: {e}")
-        return None
+        await update.message.reply_text(f"❌ Не удалось скачать Instagram: {e}")
 
-# --- ОБРАБОТЧИК ---
+async def download_pinterest(update: Update, url: str):
+    await update.message.reply_text("⏳ Скачиваю Pinterest...")
+    
+    # Пытаемся скачать как видео через yt-dlp
+    output = os.path.join(DOWNLOAD_DIR, "pin_%(id)s.%(ext)s")
+    try:
+        subprocess.run(["yt-dlp", "-o", output, url], check=True, timeout=30)
+        files = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith("pin_")]
+        if files:
+            path = os.path.join(DOWNLOAD_DIR, files[0])
+            if path.endswith(".mp4"):
+                await update.message.reply_video(open(path, "rb"), caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
+            else:
+                await update.message.reply_photo(open(path, "rb"), caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
+            os.remove(path)
+            return
+    except:
+        pass
 
-def process_media_results(chat_id, results):
-    if not results:
-        bot.send_message(chat_id, "Не удалось извлечь контент. Возможно, пост приватный или ссылка битая.")
+    # Если yt-dlp не взял, пробуем как прямое фото
+    try:
+        res = requests.get(url, headers={'User-Agent': USER_AGENT})
+        soup = BeautifulSoup(res.content, 'html.parser')
+        img = soup.find('meta', property='og:image')
+        if img:
+            await update.message.reply_photo(img['content'], caption=CAPTION_TEXT, parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text("❌ Контент Pinterest не найден")
+    except Exception:
+        await update.message.reply_text("❌ Ошибка Pinterest")
+
+# ================= HANDLERS =================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    urls = extract_urls(update.message.text)
+    if not urls:
         return
 
-    try:
-        if len(results) == 1:
-            item = results[0]
-            if item['is_video']:
-                bot.send_video(chat_id, item['url'])
-            else:
-                bot.send_photo(chat_id, item['url'])
-        else:
-            media_group = []
-            for i, entry in enumerate(results):
-                if i >= 10: break
-                if entry['is_video']:
-                    media_group.append(types.InputMediaVideo(entry['url']))
-                else:
-                    media_group.append(types.InputMediaPhoto(entry['url']))
-            bot.send_media_group(chat_id, media_group)
-    except Exception as e:
-        bot.send_message(chat_id, f"Ошибка отправки: {e}")
+    url = await get_full_url(urls[0])
 
-@bot.message_handler(content_types=['text'])
-def handle_message(message):
-    url = message.text
-    cid = message.chat.id
-    
-    if "pinterest.com" in url or "pin.it" in url:
-        bot.send_message(cid, "Pinterest: собираю все фото...")
-        process_media_results(cid, get_pinterest_content(url))
-
+    if "tiktok.com" in url:
+        await download_tiktok(update, url)
     elif "instagram.com" in url:
-        bot.send_message(cid, "Instagram: извлекаю медиа...")
-        process_media_results(cid, get_insta_content(url))
-
-    elif "tiktok.com" in url:
-        bot.send_message(cid, "TikTok: качаю...")
-        process_media_results(cid, get_tiktok_content(url))
+        await download_instagram(update, url)
+    elif "pinterest.com" in url or "pin.it" in url:
+        await download_pinterest(update, url)
     else:
-        bot.send_message(cid, "Пришлите ссылку на Instagram, Pinterest или TikTok.")
+        await update.message.reply_text("❌ Ссылка не поддерживается")
 
-if __name__ == '__main__':
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>🤖 Multi Downloader Bot</b>\n\nПришли ссылку на TikTok, Pinterest или Instagram!",
+        parse_mode=ParseMode.HTML
+    )
+
+# ================= MAIN =================
+
+def main():
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN не задан")
+        return
+
+    # Запуск Flask в отдельном потоке
     Thread(target=run_flask, daemon=True).start()
-    print("Бот запущен с полной поддержкой каруселей!")
-    bot.infinity_polling()
+
+    # Запуск бота
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start_command))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("Бот запущен...")
+    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
