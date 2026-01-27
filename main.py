@@ -4,51 +4,52 @@ import requests
 from bs4 import BeautifulSoup
 import instaloader
 import re
-import shutil 
+import shutil
 from flask import Flask
 from threading import Thread
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Вместо логина/пароля берем Session ID из переменных окружения
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 INSTA_SESSION_ID = os.environ.get('INSTA_SESSION_ID') 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 
 bot = telebot.TeleBot(BOT_TOKEN)
 L = instaloader.Instaloader(user_agent=USER_AGENT)
 
-# --- ФЕЙКОВЫЙ СЕРВЕР (Для Render) ---
+# --- FLASK СЕРВЕР (Логика из Кода 2) ---
 app = Flask(__name__)
 
-@app.route("/")
+@app.route('/')
 def home():
-    return "Bot is running", 200
+    return "Bot is running via Cookies!", 200
 
 @app.route("/health")
 def health():
     return {"status": "healthy"}, 200
 
-# --- НАСТРОЙКА INSTAGRAM (ЧЕРЕЗ COOKIES) ---
+def run_flask():
+    # Используем порт 3000 или 8080 в зависимости от настроек окружения
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# --- НАСТРОЙКА INSTAGRAM ---
 if INSTA_SESSION_ID:
     try:
         print("Настраиваем сессию через Cookie...")
-        # Подменяем сессию вручную
         L.context._session.cookies.set('sessionid', INSTA_SESSION_ID)
         L.context._session.headers.update({'User-Agent': USER_AGENT})
-        
-        # Проверка статуса (не обязательна, но полезна для логов)
         username = L.test_login()
         print(f"Успешно авторизованы как: {username}")
     except Exception as e:
         print(f"Ошибка cookie-авторизации: {e}")
 else:
-    print("ВНИМАНИЕ: Cookie не найдены! Бот работает в ограниченном режиме.")
+    print("ВНИМАНИЕ: Cookie не найдены!")
 
 DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-# --- ЛОГИКА PINTEREST ---
+# --- ЛОГИКА ЗАГРУЗКИ ---
 def download_pinterest(url, chat_id):
     try:
         headers = {'User-Agent': USER_AGENT}
@@ -66,16 +67,13 @@ def download_pinterest(url, chat_id):
         print(f"Pinterest Error: {e}")
         return None
 
-# --- ЛОГИКА INSTAGRAM ---
 def download_instagram(url, chat_id):
     try:
         shortcode_match = re.search(r'/(p|reel)/([^/?#&]+)', url) 
         if not shortcode_match: return None
         shortcode = shortcode_match.group(2)
         
-        # Загружаем пост
         post = instaloader.Post.from_shortcode(L.context, shortcode)
-        
         target_dir = f"{DOWNLOAD_FOLDER}/{chat_id}_insta"
         L.download_post(post, target=target_dir)
         
@@ -86,10 +84,9 @@ def download_instagram(url, chat_id):
         return None
     except Exception as e:
         print(f"Instagram Error: {e}")
-        # Если ошибка 401/Redirect, значит куки протухли
         return None
 
-# --- ОБРАБОТЧИК ---
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 @bot.message_handler(content_types=['text'])
 def handle_message(message):
     url = message.text
@@ -109,15 +106,17 @@ def handle_message(message):
         path = download_instagram(url, chat_id)
         if path:
             with open(path, 'rb') as f: bot.send_photo(chat_id, f)
-            shutil.rmtree(os.path.dirname(path))
+            if os.path.exists(os.path.dirname(path)):
+                shutil.rmtree(os.path.dirname(path))
         else:
             bot.send_message(chat_id, "Не удалось скачать. Проверьте ссылку или куки бота.")
     else:
-        bot.send_message(chat_id, "Жду ссылку...")
+        bot.send_message(chat_id, "Жду ссылку на Instagram или Pinterest...")
 
-def run_flask():
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
-
+# --- ЗАПУСК ---
 if __name__ == '__main__':
-    bot.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Запускаем Flask в отдельном потоке (daemon=True позволяет завершить поток при выходе)
+    Thread(target=run_flask, daemon=True).start()
+    
+    print("Бот запущен...")
+    bot.infinity_polling()
