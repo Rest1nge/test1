@@ -7,3 +7,4 @@ instaloader
 pyTelegramBotAPI 
 instaloader 
 beautifulsoup4
+http.cookiejar
