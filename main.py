@@ -6,28 +6,25 @@ import instaloader
 import re
 import shutil
 import http.cookiejar
+import json
 from flask import Flask
 from threading import Thread
 from telebot import types
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
 COOKIE_FILE = 'cookies.txt'
-DOWNLOAD_FOLDER = "downloads"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 L = instaloader.Instaloader(user_agent=USER_AGENT)
 
-if not os.path.exists(DOWNLOAD_FOLDER):
-    os.makedirs(DOWNLOAD_FOLDER)
-
-# --- FLASK СЕРВЕР ---
+# --- FLASK СЕРВЕР (Оригинальная структура) ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running via Cookies with TikTok support!", 200
+    return "Bot is running via Cookies with Carousel support!", 200
 
 @app.route("/health")
 def health():
@@ -41,41 +38,72 @@ def run_flask():
 def setup_instagram():
     if os.path.exists(COOKIE_FILE):
         try:
-            print("Настраиваем сессию Instagram...")
             cj = http.cookiejar.MozillaCookieJar(COOKIE_FILE)
             cj.load(ignore_discard=True, ignore_expires=True)
             L.context._session.cookies.update(cj)
             L.context._session.headers.update({'User-Agent': USER_AGENT})
             username = L.test_login()
             if username:
-                print(f"Успешно авторизованы в Insta как: {username}")
+                print(f"Instagram: авторизован как {username}")
         except Exception as e:
-            print(f"Ошибка Instagram-авторизации: {e}")
-    else:
-        print("ВНИМАНИЕ: Файл cookies.txt не найден!")
+            print(f"Instagram Auth Error: {e}")
 
 setup_instagram()
 
-# --- ЛОГИКА ЗАГРУЗКИ ---
+# --- ЛОГИКА ИЗВЛЕЧЕНИЯ КОНТЕНТА ---
+
+def get_pinterest_content(url):
+    try:
+        headers = {'User-Agent': USER_AGENT}
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code != 200: return None
+        
+        soup = BeautifulSoup(res.content, 'html.parser')
+        script_tag = soup.find('script', id='__PWS_DATA__')
+        
+        images = []
+        if script_tag:
+            try:
+                data = json.loads(script_tag.string)
+                # Пытаемся найти изображения в структуре Story Pin (Idea Pin)
+                pins = data.get('props', {}).get('initialReduxState', {}).get('pins', {})
+                for pin_id in pins:
+                    pin_data = pins[pin_id]
+                    # Проверяем наличие страниц карусели
+                    story_pages = pin_data.get('story_pin_data', {}).get('pages', [])
+                    if story_pages:
+                        for page in story_pages:
+                            img_url = page.get('blocks', [{}])[0].get('image', {}).get('images', {}).get('originals', {}).get('url')
+                            if img_url: images.append({'url': img_url, 'is_video': False})
+                    
+                    # Если страниц нет, берем основное фото
+                    if not images:
+                        main_img = pin_data.get('images', {}).get('orig', {}).get('url')
+                        if main_img: images.append({'url': main_img, 'is_video': False})
+            except:
+                pass
+
+        # Резервный вариант через OpenGraph, если JSON не отдался
+        if not images:
+            meta_img = soup.find('meta', property='og:image')
+            if meta_img: images.append({'url': meta_img['content'], 'is_video': False})
+            
+        return images if images else None
+    except Exception as e:
+        print(f"Pinterest Error: {e}")
+        return None
 
 def get_tiktok_content(url):
     try:
-        # Используем сторонний API для получения прямых ссылок TikTok
         api_url = f"https://www.tikwm.com/api/?url={url}"
         response = requests.get(api_url).json()
         data = response.get('data')
+        if not data: return None
         
-        if not data:
-            return None
-        
-        # Если это слайд-шоу (фотографии)
         if 'images' in data and data['images']:
             return [{'url': img, 'is_video': False} for img in data['images']]
-        
-        # Если это видео
         if 'play' in data:
             return [{'url': data['play'], 'is_video': True}]
-            
         return None
     except Exception as e:
         print(f"TikTok Error: {e}")
@@ -83,72 +111,22 @@ def get_tiktok_content(url):
 
 def get_insta_content(url):
     try:
-        shortcode_match = re.search(r'/(p|reel|tv)/([^/?#&]+)', url)
-        if not shortcode_match: return None
-        shortcode = shortcode_match.group(2)
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        match = re.search(r'/(p|reel|tv)/([^/?#&]+)', url)
+        if not match: return None
+        post = instaloader.Post.from_shortcode(L.context, match.group(2))
         
         if post.typename == 'GraphSidecar':
-            media_urls = []
-            for node in post.get_sidecar_nodes():
-                media_urls.append({
-                    'url': node.video_url if node.is_video else node.display_url, 
-                    'is_video': node.is_video
-                })
-            return media_urls
+            return [{'url': n.video_url if n.is_video else n.display_url, 'is_video': n.is_video} for n in post.get_sidecar_nodes()]
         return [{'url': post.video_url if post.is_video else post.url, 'is_video': post.is_video}]
     except Exception as e:
         print(f"Instagram Error: {e}")
         return None
 
-def download_pinterest(url, chat_id):
-    try:
-        headers = {'User-Agent': USER_AGENT}
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200: return None
-        soup = BeautifulSoup(response.content, 'html.parser')
-        image_tag = soup.find('meta', property='og:image')
-        if image_tag:
-            img_data = requests.get(image_tag['content']).content
-            filename = f"{DOWNLOAD_FOLDER}/pin_{chat_id}.jpg"
-            with open(filename, 'wb') as handler: handler.write(img_data)
-            return filename
-        return None
-    except Exception as e:
-        print(f"Pinterest Error: {e}")
-        return None
-
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
-@bot.message_handler(content_types=['text'])
-def handle_message(message):
-    url = message.text
-    chat_id = message.chat.id
-    
-    if "pinterest.com" in url or "pin.it" in url:
-        bot.send_message(chat_id, "Pinterest: качаю...")
-        path = download_pinterest(url, chat_id)
-        if path:
-            with open(path, 'rb') as f: bot.send_photo(chat_id, f)
-            os.remove(path)
-        else:
-            bot.send_message(chat_id, "Ошибка Pinterest.")
-
-    elif "instagram.com" in url:
-        bot.send_message(chat_id, "Instagram: извлекаю контент...")
-        results = get_insta_content(url)
-        process_media_results(chat_id, results)
-
-    elif "tiktok.com" in url:
-        bot.send_message(chat_id, "TikTok: извлекаю контент...")
-        results = get_tiktok_content(url)
-        process_media_results(chat_id, results)
-
-    else:
-        bot.send_message(chat_id, "Жду ссылку на Instagram, Pinterest или TikTok...")
+# --- ОБРАБОТЧИК ---
 
 def process_media_results(chat_id, results):
     if not results:
-        bot.send_message(chat_id, "Не удалось скачать контент. Проверьте ссылку или настройки.")
+        bot.send_message(chat_id, "Не удалось извлечь контент. Возможно, пост приватный или ссылка битая.")
         return
 
     try:
@@ -161,17 +139,35 @@ def process_media_results(chat_id, results):
         else:
             media_group = []
             for i, entry in enumerate(results):
-                if i >= 10: break # Лимит Telegram на альбомы
+                if i >= 10: break
                 if entry['is_video']:
                     media_group.append(types.InputMediaVideo(entry['url']))
                 else:
                     media_group.append(types.InputMediaPhoto(entry['url']))
             bot.send_media_group(chat_id, media_group)
     except Exception as e:
-        bot.send_message(chat_id, f"Ошибка при отправке: {e}")
+        bot.send_message(chat_id, f"Ошибка отправки: {e}")
 
-# --- ЗАПУСК ---
+@bot.message_handler(content_types=['text'])
+def handle_message(message):
+    url = message.text
+    cid = message.chat.id
+    
+    if "pinterest.com" in url or "pin.it" in url:
+        bot.send_message(cid, "Pinterest: собираю все фото...")
+        process_media_results(cid, get_pinterest_content(url))
+
+    elif "instagram.com" in url:
+        bot.send_message(cid, "Instagram: извлекаю медиа...")
+        process_media_results(cid, get_insta_content(url))
+
+    elif "tiktok.com" in url:
+        bot.send_message(cid, "TikTok: качаю...")
+        process_media_results(cid, get_tiktok_content(url))
+    else:
+        bot.send_message(cid, "Пришлите ссылку на Instagram, Pinterest или TikTok.")
+
 if __name__ == '__main__':
     Thread(target=run_flask, daemon=True).start()
-    print("Бот запущен...")
+    print("Бот запущен с полной поддержкой каруселей!")
     bot.infinity_polling()
