@@ -1,13 +1,3 @@
-import os
-import re
-import requests
-import subprocess
-from urllib.parse import urlparse
-from flask import Flask
-from threading import Thread
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import instaloader
 import telebot
 import os
 import requests
@@ -15,125 +5,120 @@ from bs4 import BeautifulSoup
 import instaloader
 import re
 import shutil
-# ================= CONFIG =================
-#BOT_TOKEN = os.getenv("BOT_TOKEN")
-#DOWNLOAD_DIR = "downloads"
-#COOKIES_FILE = "cookies.txt"
+from flask import Flask
+from threading import Thread
 
-#os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# ================= FLASK =================
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is running", 200
-
-@app.route("/health")
-def health():
-    return {"status": "healthy"}, 200
-
-
-
-# Вставьте сюда ваш токен
+# --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Вместо логина/пароля берем Session ID из переменных окружения
+INSTA_SESSION_ID = os.environ.get('INSTA_SESSION_ID') 
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 
 bot = telebot.TeleBot(BOT_TOKEN)
-L = instaloader.Instaloader()
+L = instaloader.Instaloader(user_agent=USER_AGENT)
 
-# Папка для временного хранения медиа
+# --- ФЕЙКОВЫЙ СЕРВЕР (Для Render) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running via Cookies!"
+
+def run_http():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_http)
+    t.start()
+
+# --- НАСТРОЙКА INSTAGRAM (ЧЕРЕЗ COOKIES) ---
+if INSTA_SESSION_ID:
+    try:
+        print("Настраиваем сессию через Cookie...")
+        # Подменяем сессию вручную
+        L.context._session.cookies.set('sessionid', INSTA_SESSION_ID)
+        L.context._session.headers.update({'User-Agent': USER_AGENT})
+        
+        # Проверка статуса (не обязательна, но полезна для логов)
+        username = L.test_login()
+        print(f"Успешно авторизованы как: {username}")
+    except Exception as e:
+        print(f"Ошибка cookie-авторизации: {e}")
+else:
+    print("ВНИМАНИЕ: Cookie не найдены! Бот работает в ограниченном режиме.")
+
 DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-# --- Логика для Pinterest ---
+# --- ЛОГИКА PINTEREST ---
 def download_pinterest(url, chat_id):
     try:
-        # Используем заголовки, чтобы притвориться обычным браузером
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': USER_AGENT}
         response = requests.get(url, headers=headers)
+        if response.status_code != 200: return None
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Ищем мета-тег с изображением высокого качества
         image_tag = soup.find('meta', property='og:image')
-        
         if image_tag:
-            image_url = image_tag['content']
-            img_data = requests.get(image_url).content
+            img_data = requests.get(image_tag['content']).content
             filename = f"{DOWNLOAD_FOLDER}/pin_{chat_id}.jpg"
-            
-            with open(filename, 'wb') as handler:
-                handler.write(img_data)
-            
+            with open(filename, 'wb') as handler: handler.write(img_data)
             return filename
-        else:
-            return None
+        return None
     except Exception as e:
-        print(f"Ошибка Pinterest: {e}")
+        print(f"Pinterest Error: {e}")
         return None
 
-# --- Логика для Instagram ---
+# --- ЛОГИКА INSTAGRAM ---
 def download_instagram(url, chat_id):
     try:
-        # Извлекаем shortcode из ссылки (например, из https://www.instagram.com/p/CODE123/)
         shortcode_match = re.search(r'/(p|reel)/([^/?#&]+)', url) 
-        if not shortcode_match:
-            return None
-        
+        if not shortcode_match: return None
         shortcode = shortcode_match.group(2)
+        
+        # Загружаем пост
         post = instaloader.Post.from_shortcode(L.context, shortcode)
         
-        # Скачиваем пост
         target_dir = f"{DOWNLOAD_FOLDER}/{chat_id}_insta"
         L.download_post(post, target=target_dir)
         
-        # Находим скачанный jpg файл
         for root, dirs, files in os.walk(target_dir):
             for file in files:
                 if file.endswith(".jpg"):
                     return os.path.join(root, file)
         return None
     except Exception as e:
-        print(f"Ошибка Instagram: {e}")
+        print(f"Instagram Error: {e}")
+        # Если ошибка 401/Redirect, значит куки протухли
         return None
 
-# --- Обработчик сообщений ---
+# --- ОБРАБОТЧИК ---
 @bot.message_handler(content_types=['text'])
 def handle_message(message):
     url = message.text
     chat_id = message.chat.id
     
-    # Проверка на Pinterest
     if "pinterest.com" in url or "pin.it" in url:
-        bot.send_message(chat_id, "Скачиваю фото с Pinterest...")
-        file_path = download_pinterest(url, chat_id)
-        
-        if file_path:
-            with open(file_path, 'rb') as photo:
-                bot.send_photo(chat_id, photo)
-            os.remove(file_path) # Удаляем файл после отправки
+        bot.send_message(chat_id, "Pinterest: качаю...")
+        path = download_pinterest(url, chat_id)
+        if path:
+            with open(path, 'rb') as f: bot.send_photo(chat_id, f)
+            os.remove(path)
         else:
-            bot.send_message(chat_id, "Не удалось найти изображение.")
+            bot.send_message(chat_id, "Ошибка Pinterest.")
 
-    # Проверка на Instagram
     elif "instagram.com" in url:
-        bot.send_message(chat_id, "Скачиваю фото с Instagram (это может занять время)...")
-        file_path = download_instagram(url, chat_id)
-        
-        if file_path:
-            with open(file_path, 'rb') as photo:
-                bot.send_photo(chat_id, photo)
-            # Удаляем папку с загрузкой Instagram
-            shutil.rmtree(os.path.dirname(file_path))
+        bot.send_message(chat_id, "Instagram: качаю...")
+        path = download_instagram(url, chat_id)
+        if path:
+            with open(path, 'rb') as f: bot.send_photo(chat_id, f)
+            shutil.rmtree(os.path.dirname(path))
         else:
-            bot.send_message(chat_id, "Не удалось скачать. Возможно, профиль закрыт или Instagram заблокировал запрос.")
-            
+            bot.send_message(chat_id, "Не удалось скачать. Проверьте ссылку или куки бота.")
     else:
-        bot.send_message(chat_id, "Отправьте мне ссылку на пост в Instagram или Pinterest.")
+        bot.send_message(chat_id, "Жду ссылку...")
 
-# Запуск бота
 if __name__ == '__main__':
-    print("Бот запущен...")
+    keep_alive()
     bot.infinity_polling()
