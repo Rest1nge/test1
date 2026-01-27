@@ -8,13 +8,19 @@ from threading import Thread
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import instaloader
-
+import telebot
+import os
+import requests
+from bs4 import BeautifulSoup
+import instaloader
+import re
+import shutil
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DOWNLOAD_DIR = "downloads"
-COOKIES_FILE = "cookies.txt"
+#BOT_TOKEN = os.getenv("BOT_TOKEN")
+#DOWNLOAD_DIR = "downloads"
+#COOKIES_FILE = "cookies.txt"
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+#os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -27,131 +33,107 @@ def home():
 def health():
     return {"status": "healthy"}, 200
 
-# ================= UTILS =================
-def extract_urls(text: str):
-    return re.findall(r"(https?://[^\s]+)", text)
 
-def clean_downloads():
-    for f in os.listdir(DOWNLOAD_DIR):
-        os.remove(os.path.join(DOWNLOAD_DIR, f))
 
-# ================= COMMANDS =================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Отправь ссылку — я скачаю фото или видео.\nПоддержка:\n"
-        "• TikTok\n• Instagram (Post / Reel)\n• Pinterest\n• YouTube Shorts"
-    )
+# Вставьте сюда ваш токен
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ================= DOWNLOAD FUNCTIONS =================
-async def download_tiktok(url):
-    output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
-    cmd = ["yt-dlp", "-f", "bv*+ba/best", "--merge-output-format", "mp4", "-o", output, url]
-    subprocess.run(cmd, check=False)
-    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
+bot = telebot.TeleBot(BOT_TOKEN)
+L = instaloader.Instaloader()
 
-async def download_youtube(url):
-    output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
-    cmd = ["yt-dlp", "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4", "-o", output, url]
-    subprocess.run(cmd, check=False)
-    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
+# Папка для временного хранения медиа
+DOWNLOAD_FOLDER = "downloads"
+if not os.path.exists(DOWNLOAD_FOLDER):
+    os.makedirs(DOWNLOAD_FOLDER)
 
-async def download_instagram_post(url):
-    clean_downloads()
-    L = instaloader.Instaloader(download_videos=True, download_comments=False, save_metadata=False, dirname_pattern=DOWNLOAD_DIR)
+# --- Логика для Pinterest ---
+def download_pinterest(url, chat_id):
     try:
-        shortcode = url.rstrip("/").split("/")[-1]
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
-        L.download_post(post, target=DOWNLOAD_DIR)
+        # Используем заголовки, чтобы притвориться обычным браузером
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Ищем мета-тег с изображением высокого качества
+        image_tag = soup.find('meta', property='og:image')
+        
+        if image_tag:
+            image_url = image_tag['content']
+            img_data = requests.get(image_url).content
+            filename = f"{DOWNLOAD_FOLDER}/pin_{chat_id}.jpg"
+            
+            with open(filename, 'wb') as handler:
+                handler.write(img_data)
+            
+            return filename
+        else:
+            return None
     except Exception as e:
-        print("Instagram error:", e)
-    return sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
+        print(f"Ошибка Pinterest: {e}")
+        return None
 
-async def download_pinterest(url):
-    clean_downloads()
-    files = []
+# --- Логика для Instagram ---
+def download_instagram(url, chat_id):
     try:
-        r = requests.get(url, timeout=10).text
-        img_urls = re.findall(r'"images":\{"orig":\{"url":"(https:[^"]+)"\}', r)
-        for i, img_url in enumerate(img_urls):
-            ext = img_url.split(".")[-1].split("?")[0]
-            path = os.path.join(DOWNLOAD_DIR, f"pin_{i}.{ext}")
-            with open(path, "wb") as f:
-                f.write(requests.get(img_url).content)
-            files.append(path)
-    except:
-        pass
-    # Видео через yt-dlp
-    if not files:
-        output = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
-        cmd = ["yt-dlp", "-f", "bv*+ba/best", "--merge-output-format", "mp4", "-o", output, url]
-        subprocess.run(cmd, check=False)
-        files = sorted(os.listdir(DOWNLOAD_DIR), key=lambda x: os.path.getctime(os.path.join(DOWNLOAD_DIR, x)))
-    return files
+        # Извлекаем shortcode из ссылки (например, из https://www.instagram.com/p/CODE123/)
+        shortcode_match = re.search(r'/(p|reel)/([^/?#&]+)', url) 
+        if not shortcode_match:
+            return None
+        
+        shortcode = shortcode_match.group(2)
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        
+        # Скачиваем пост
+        target_dir = f"{DOWNLOAD_FOLDER}/{chat_id}_insta"
+        L.download_post(post, target=target_dir)
+        
+        # Находим скачанный jpg файл
+        for root, dirs, files in os.walk(target_dir):
+            for file in files:
+                if file.endswith(".jpg"):
+                    return os.path.join(root, file)
+        return None
+    except Exception as e:
+        print(f"Ошибка Instagram: {e}")
+        return None
 
-# ================= MESSAGE HANDLER =================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    urls = extract_urls(update.message.text)
-    if not urls:
-        await update.message.reply_text("❌ Ссылки не найдено")
-        return
-
-    url = urls[0]
-    clean_downloads()
-    files = []
-
-    parsed = urlparse(url)
-    domain = parsed.netloc.lower()
-    path = parsed.path
-
-    # ===== Platform selection =====
-    if "tiktok.com" in domain:
-        files = await download_tiktok(url)
-    elif "youtube.com" in domain or "youtu.be" in domain:
-        files = await download_youtube(url)
-    elif "instagram.com" in domain:
-        if path.startswith("/p/"):
-            files = await download_instagram_post(url)
-        elif path.startswith("/reel/"):
-            files = await download_youtube(url)
+# --- Обработчик сообщений ---
+@bot.message_handler(content_types=['text'])
+def handle_message(message):
+    url = message.text
+    chat_id = message.chat.id
+    
+    # Проверка на Pinterest
+    if "pinterest.com" in url or "pin.it" in url:
+        bot.send_message(chat_id, "Скачиваю фото с Pinterest...")
+        file_path = download_pinterest(url, chat_id)
+        
+        if file_path:
+            with open(file_path, 'rb') as photo:
+                bot.send_photo(chat_id, photo)
+            os.remove(file_path) # Удаляем файл после отправки
         else:
-            await update.message.reply_text("❌ Instagram: неизвестный формат")
-            return
-    elif "pinterest.com" in domain:
-        files = await download_pinterest(url)
+            bot.send_message(chat_id, "Не удалось найти изображение.")
+
+    # Проверка на Instagram
+    elif "instagram.com" in url:
+        bot.send_message(chat_id, "Скачиваю фото с Instagram (это может занять время)...")
+        file_path = download_instagram(url, chat_id)
+        
+        if file_path:
+            with open(file_path, 'rb') as photo:
+                bot.send_photo(chat_id, photo)
+            # Удаляем папку с загрузкой Instagram
+            shutil.rmtree(os.path.dirname(file_path))
+        else:
+            bot.send_message(chat_id, "Не удалось скачать. Возможно, профиль закрыт или Instagram заблокировал запрос.")
+            
     else:
-        await update.message.reply_text("❌ Платформа не поддерживается")
-        return
+        bot.send_message(chat_id, "Отправьте мне ссылку на пост в Instagram или Pinterest.")
 
-    if not files:
-        await update.message.reply_text("❌ Контент не найден")
-        return
-
-    # ===== Send files =====
-    for f in files:
-        path = os.path.join(DOWNLOAD_DIR, f)
-        ext = f.lower()
-        if ext.endswith((".mp4", ".webm", ".mov")):
-            await update.message.reply_video(open(path, "rb"), caption="скачано с помощью @instbotsavebot")
-        elif ext.endswith((".jpg", ".jpeg", ".png")):
-            await update.message.reply_photo(open(path, "rb"))
-        else:
-            await update.message.reply_document(open(path, "rb"))
-        os.remove(path)
-
-# ================= START BOT =================
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
-
-def main():
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN не задан")
-        return
-
-    Thread(target=run_flask, daemon=True).start()
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start_command))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+# Запуск бота
+if __name__ == '__main__':
+    print("Бот запущен...")
+    bot.infinity_polling()
